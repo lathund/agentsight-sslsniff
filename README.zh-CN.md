@@ -1,262 +1,554 @@
-# AgentSight：基于 eBPF 的零侵入 LLM 智能体可观测性工具
+# eBPF 监控工具
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/eunomia-bpf/agentsight/actions/workflows/ci.yml/badge.svg)](https://github.com/eunomia-bpf/agentsight/actions/workflows/ci.yml)
+[English](README.md) | **中文**
 
-[English](https://github.com/eunomia-bpf/agentsight/blob/master/README.md) | **中文**
+本目录包含用于系统可观测性和安全分析的 eBPF 监控工具。
 
-AgentSight 是一款专为监控 LLM 智能体行为而设计的可观测性工具，通过 SSL/TLS 流量拦截和进程监控来实现。与传统的应用级插桩不同，AgentSight 使用 eBPF 技术在系统边界进行观测，以极低的性能开销提供对 AI 智能体交互的全面洞察。
+## 工具概述
 
-**零侵入** - 无需修改代码，无需引入新依赖，无需集成 SDK。开箱即用，兼容任何 AI 框架或应用。
+### 1. 进程追踪器（`process`）
 
-## 快速开始
+基于 eBPF 的高级进程监控工具，追踪进程生命周期和文件打开操作，并具备智能事件去重功能。
 
+**核心特性：**
+- 监控进程创建和终止
+- 追踪文件打开操作并去重
+- 可配置的过滤模式，适用于不同监控级别
+- 60 秒滑动窗口聚合重复文件打开事件
+- JSON 输出格式，便于与分析框架集成
+- 详细调试模式用于故障排除
+
+**使用方法：**
 ```bash
-cargo install agentsight
-# 或：wget https://github.com/eunomia-bpf/agentsight/releases/latest/download/agentsight && chmod +x agentsight
-agentsight top
+sudo ./process [OPTIONS]
 ```
 
-<div align="center">
-  <img src="https://github.com/eunomia-bpf/agentsight/raw/master/docs/top-mode-demo.png" alt="AgentSight top 实时 session 视图" width="1000">
-  <p><em>按 model、session token、health、进程族、工具调用、文件活动和网络活动排序的实时智能体视图</em></p>
-</div>
+**命令行参数：**
 
-如果使用下载到当前目录的二进制，请运行 `./agentsight top`。
-`top` 无需 sudo 也能工作，会读取进程快照以及 Claude、Codex、Gemini、OpenCode
-和 OpenClaw 的本地 session 日志；当你用 sudo 运行，或当前用户已有免密/缓存 sudo
-时，它会自动启用 live eBPF capture。
+| 参数 | 缩写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `--help` | `-?` | 显示帮助信息并退出 | - |
+| `--usage` | - | 显示简要用法 | - |
+| `--version` | `-V` | 显示版本信息 | - |
+| `--verbose` | `-v` | 启用详细调试输出到 stderr | 禁用 |
+| `--duration=MS` | `-d MS` | 报告的最小进程持续时间（毫秒） | 0 |
+| `--commands=LIST` | `-c LIST` | 逗号分隔的要追踪的命令列表 | 全部 |
+| `--pid=PID` | `-p PID` | 仅追踪指定 PID | 全部 |
+| `--mode=MODE` | `-m MODE` | 过滤模式（0=全部, 1=进程, 2=过滤） | 2 |
+| `--all` | `-a` | 已弃用：请使用 `-m 0` | - |
 
-如果希望长期后台观察本机智能体，而不是一直开着终端，可以安装 systemd user
-service：
+**过滤模式：**
+- `0（全部）`：追踪所有进程和所有文件打开操作
+- `1（进程）`：追踪所有进程，但仅追踪已跟踪 PID 的文件打开
+- `2（过滤）`：仅追踪匹配过滤条件的进程及其文件打开（默认）
 
+**示例：**
 ```bash
-agentsight monitor install-service
+# 追踪所有内容并启用详细输出
+sudo ./process -v -m 0
+
+# 追踪所有进程，选择性读写
+sudo ./process -m 1
+
+# 仅追踪特定进程
+sudo ./process -c "claude,python,node"
+
+# 追踪持续时间超过 1 秒的进程
+sudo ./process -c "ssh" -d 1000
+
+# 追踪指定 PID 并启用详细调试
+sudo ./process -v -p 1234
+
+# 追踪多个命令并设置最小持续时间
+sudo ./process -c "curl,wget" -d 500
 ```
 
-当 monitor service 正在运行时，`agentsight top` 会直接读取后台 monitor 已保存的窗口数据，
-不会再启动另一套 live probes。
-后台 monitor 是轻量模式：记录匹配到的本地 agent session，以及进程快照中的 CPU、内存、
-I/O 和文件目标数量。它不会捕获 SSL/API payload 或其它 eBPF 事件；如果需要完整 live
-eBPF capture，可以使用已有 sudo 权限运行 `agentsight top`，或使用
-`sudo agentsight record -- <command>` 录制命令。
+**文件打开去重：**
+- 文件打开首次出现时立即报告（`count=1`）
+- 60 秒窗口内的相同文件打开操作会被聚合
+- 窗口过期时报告聚合结果（`count=N`）
+- 进程退出时刷新所有待处理的聚合
+- 对于重复的文件打开操作，事件量减少 80-95%
 
-## 为什么选择 AgentSight？
+**详细调试输出（`-v`）：**
+- 显示事件去重/聚合时机
+- 报告聚合窗口过期
+- 显示进程退出时的聚合刷新
+- 展示聚合表统计信息
+- 帮助排查去重行为
 
-### 传统可观测性 vs. 系统级监控
+### 2. SSL 流量监控器（`sslsniff`）
 
-[LangSmith](https://docs.langchain.com/langsmith/observability-concepts)、[Langfuse](https://langfuse.com/docs/observability/overview)、[Phoenix](https://arize.com/docs/phoenix/) 这类应用级工具很适合在你拥有应用代码时追踪 trace、prompt、token、eval 和延迟。[Helicone](https://docs.helicone.ai/getting-started/integration-method/gateway) 这类 gateway/proxy 工具则适合在你可以把 provider 流量路由到托管入口时使用。
+基于 eBPF 的 SSL/TLS 流量拦截器，捕获加密通信用于安全分析。
 
-AgentSight 关注的是这些工具经常遗漏的一层：智能体在系统边界实际做了什么。它无需 SDK 或代理，就能从应用外部观察已有二进制和 CLI 智能体，并把 LLM 流量与进程执行、文件访问和系统活动关联起来。
+**核心特性：**
+- 实时拦截 SSL/TLS 流量
+- 支持多种 SSL 库（OpenSSL、GnuTLS、NSS）
+- 进程级过滤能力（PID、UID、命令）
+- 从加密流中提取明文
+- 握手事件监控
+- JSON 输出格式用于分析
 
-| **挑战** | **应用级工具** | **AgentSight 方案** |
-|----------|--------------|---------------------|
-| **框架接入** | 每个应用需要接入 SDK、callback 或 gateway | 系统级追踪器，无需修改代码 |
-| **闭源 CLI** | 只能看到工具主动暴露或记录的内容 | 从应用外部观察已有二进制和 CLI 智能体 |
-| **智能体可控日志** | 日志可能不完整、被关闭或被修改 | 独立于应用日志的内核级事件 |
-| **TLS LLM 流量** | 通过 SDK/代理路由时可见 | 无需代理，在 SSL/TLS 调用处捕获明文 |
-| **系统动作** | 容易遗漏子进程和本地文件活动 | 追踪进程执行、文件访问和资源使用 |
-| **跨边界行为** | Trace 通常停在框架或进程边界 | 关联 LLM 流量、进程事件和文件事件 |
-
-AgentSight 能捕获应用级工具遗漏的关键交互：
-
-- 绕过插桩的子进程执行
-- SSL/TLS 调用边界处的 LLM 明文载荷
-- 文件操作和系统资源访问
-- 跨 LLM、进程和文件事件的边界行为
-
-## 使用方法
-
-### 前置要求
-
-- **Windows、macOS 或 Linux**：`top`、`bind`、`vis` 和 `report` 可以直接读取
-  Agent 原生会话文件，不依赖 eBPF
-- **Linux 内核**：`record` 和基于 eBPF 的调试命令需要 4.1+ 且支持 eBPF
-  （推荐 5.0+）
-- **Linux sudo 权限**：`top` 可选；当 sudo 已可用时会自动启用 eBPF probes
-
-从源码构建请参阅 `docs/build.md`；Linux 的完整 eBPF 构建还需要 Node.js 18+、
-clang、llvm 和 libelf-dev。
-
-### Rust 库
-
-Rust 应用可以依赖
-[`agentsight-capture`](https://crates.io/crates/agentsight-capture)，复用与
-`agentsight` 二进制相同的 eBPF runner、Agent 原生数据源、分析器、事件模型、
-物化视图和 sink。CLI 仍作为独立的 `agentsight` package 发布，并且是该库的
-主要使用者。
-
-### 安装
-
-#### Cargo 或 Release Binary
-
-本地使用优先安装 CLI，然后运行 `agentsight top`。需要记录某个具体命令时运行
-`sudo agentsight record -- <command>`；默认会在当前目录生成 `agentsight-*.db`，
-随后 `agentsight report` 和 `agentsight report list` 也默认查看当前目录里的记录。
-如果要查看 Claude/Codex/Gemini 的原生日志总览，显式运行 `agentsight report --local`。
-
-GitHub Release 为 Linux 提供 `agentsight-x86_64` 和 `agentsight-aarch64`；
-无后缀的 `agentsight` 继续作为 x86_64 兼容文件保留。
-Windows 原生构建由 Windows CI 验证；正式发布 Windows Release 资产前，可以下载
-该工作流的 `agentsight-windows-x86_64` artifact，或从源码构建 collector crate。
-
-Linux 与 Windows 的安装、后台监控、Node 绑定、自动启动、升级和卸载步骤，参见
-[安装与开机启动](docs/installation.zh-CN.md)。
-
-#### Docker
-
-AgentSight 通过 Docker 运行，使用 `--privileged` 以支持 eBPF，`--pid=host` 以访问宿主机进程，`-v /sys:/sys:ro` 用于进程监控，`-v /usr:/usr:ro -v /lib:/lib:ro` 用于访问 SSL 库（在共享库如 `libssl.so` 上附加 uprobe 所需）。示例：
-
+**使用方法：**
 ```bash
-# 监控 Python AI 工具
-docker run --privileged --pid=host --network=host \
-  -v /sys:/sys:ro -v /usr:/usr:ro -v /lib:/lib:ro \
-  -v $(pwd)/logs:/logs \
-  ghcr.io/eunomia-bpf/agentsight:latest \
-  record --comm python
-
-# 监控 Claude Code（挂载 home 目录以访问二进制文件）
-docker run --privileged --pid=host --network=host \
-  -v /sys:/sys:ro -v /usr:/usr:ro -v /lib:/lib:ro \
-  -v $HOME/.local/share/claude:/claude:ro \
-  -v $(pwd)/logs:/logs \
-  ghcr.io/eunomia-bpf/agentsight:latest \
-  record --comm claude --binary-path /claude/versions/2.1.39
+sudo ./sslsniff [OPTIONS]
 ```
 
-#### 从源码构建
+**命令行参数：**
+
+| 参数 | 缩写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `--help` | `-?` | 显示帮助信息并退出 | - |
+| `--usage` | - | 显示简要用法 | - |
+| `--version` | `-V` | 显示版本信息 | - |
+| `--verbose` | `-v` | 启用详细调试输出到 stderr | 禁用 |
+| `--pid=PID` | `-p PID` | 仅追踪指定 PID | 全部 |
+| `--uid=UID` | `-u UID` | 仅追踪指定 UID | 全部 |
+| `--comm=COMMAND` | `-c COMMAND` | 仅追踪匹配的命令 | 全部 |
+| `--binary-path` | - | 静态链接 SSL 的二进制文件路径 | 自动检测 |
+| `--no-openssl` | `-o` | 禁用 OpenSSL 流量捕获 | 已启用 |
+| `--no-gnutls` | `-g` | 禁用 GnuTLS 流量捕获 | 已禁用 |
+| `--no-nss` | `-n` | 禁用 NSS 流量捕获 | 已禁用 |
+| `--handshake` | `-h` | 显示 SSL 握手事件 | 禁用 |
+
+**SSL 库支持：**
+- **OpenSSL**：默认启用（最常见），附加到系统 `libssl.so`
+- **GnuTLS**：默认禁用，使用 `--gnutls` 启用或使用 `--no-openssl` 禁用 OpenSSL
+- **NSS**：默认禁用，使用 `--nss` 启用
+- **BoringSSL**（静态链接）：提供 `--binary-path` 时通过字节模式匹配自动检测。支持剥离符号的二进制文件（无需符号）。
+
+**示例：**
+```bash
+# 监控所有 SSL 流量并启用详细输出
+sudo ./sslsniff -v
+
+# 按 PID 监控特定进程
+sudo ./sslsniff -p 1234
+
+# 监控指定用户的 SSL 流量
+sudo ./sslsniff -u 1000
+
+# 仅监控 curl 的 SSL 流量
+sudo ./sslsniff -c curl
+
+# 监控并显示握手事件
+sudo ./sslsniff -h
+
+# 仅监控 GnuTLS 流量（禁用 OpenSSL）
+sudo ./sslsniff --no-openssl -g
+
+# 监控特定进程，启用握手和详细输出
+sudo ./sslsniff -v -h -p 1234
+
+# 多条件监控
+sudo ./sslsniff -c "python" -u 1000 -h
+```
+
+**监控静态链接 SSL 的应用（BoringSSL/OpenSSL）：**
+
+某些应用（如 Claude Code/Bun、NVM Node.js）静态链接了 SSL 库而非使用系统 `libssl.so`。对于这些应用，使用 `--binary-path` 指向实际的可执行文件：
 
 ```bash
-# 克隆仓库（含子模块）
-git clone https://github.com/eunomia-bpf/agentsight.git --recursive
-cd agentsight
+# 监控 Claude Code（Bun + 静态链接 BoringSSL）
+# 注意：不要使用 -c claude，因为 SSL 流量来自 "HTTP Client" 线程
+sudo ./sslsniff --binary-path ~/.local/share/claude/versions/2.1.39
 
-# 安装系统依赖（Ubuntu/Debian）
+# 监控 NVM Node.js（静态链接 OpenSSL）
+sudo ./sslsniff --binary-path ~/.nvm/versions/node/v20.0.0/bin/node
+
+# 启用详细输出以查看检测到的偏移量
+sudo ./sslsniff --binary-path ~/.local/share/claude/versions/2.1.39 --verbose
+# stderr: BoringSSL detected! SSL_read=0x5c38e80, SSL_write=0x5c39b20, ...
+```
+
+指定 `--binary-path` 时，sslsniff 会：
+1. 首先尝试从二进制文件中解析 `SSL_read`/`SSL_write` 符号
+2. 如果找不到符号（符号被剥离的二进制文件），回退到 BoringSSL 字节模式检测以自动找到函数偏移量
+3. 在检测到的偏移量处附加 uprobe
+
+> **重要提示**：`-c`（comm）过滤器匹配的是 `bpf_get_current_comm()` 返回的**线程名**，而非进程名。对于像 Claude Code 这样 SSL 在专用 "HTTP Client" 线程上运行的应用，使用 `-c claude` 会过滤掉所有流量。使用 `--binary-path` 时请省略 `-c`。
+
+**输出格式：**
+- 每个 SSL 事件以 JSON 对象输出
+- eBPF 捕获受每个事件的 `MAX_BUF_SIZE` 限制；超大读取会标记为截断
+- 事件包含时间戳、进程信息和 SSL 数据
+- 握手事件显示 SSL 协商详情
+
+**过滤选项：**
+- **PID 过滤**：仅捕获指定进程的流量
+- **UID 过滤**：仅捕获指定用户的流量
+- **命令过滤**：仅捕获匹配命令名的流量
+- **库过滤**：选择监控哪些 SSL 库
+
+### 3. Stdio 载荷捕获（`stdiocap`）
+
+基于 eBPF 的 stdio 和管道载荷追踪器，用于本地进程通信。适用于 SSL/TLS 追踪不适用但仍需查看请求/响应载荷的场景（如本地 MCP 的 `stdio` 模式）。
+
+**核心特性：**
+- 从目标进程捕获 `read` 和 `write` 载荷
+- 默认关注 `stdin` / `stdout` / `stderr`
+- 可选全 FD 模式，用于追踪基于管道的客户端进程
+- JSON 输出，包含 PID、FD 角色、FD 目标、延迟和载荷内容
+
+**使用方法：**
+```bash
+sudo ./stdiocap -p PID [OPTIONS]
+```
+
+**命令行参数：**
+
+| 参数 | 缩写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `--pid=PID` | `-p PID` | 仅追踪此 PID | 必填 |
+| `--uid=UID` | `-u UID` | 仅追踪此 UID | 全部 |
+| `--comm=COMMAND` | `-c COMMAND` | 仅追踪匹配的命令 | 全部 |
+| `--all-fds` | - | 捕获所有 FD 而非仅 `0/1/2` | 禁用 |
+| `--max-bytes=BYTES` | - | 每个事件输出的最大字节数 | 8192 |
+| `--verbose` | `-v` | 启用 libbpf 详细调试输出 | 禁用 |
+
+**示例：**
+```bash
+# 追踪本地 MCP 服务器进程的 stdio 载荷
+sudo ./stdiocap -p 12345
+
+# 追踪 MCP 管道 FD 不是 0/1/2 的客户端进程
+sudo ./stdiocap -p 12345 --all-fds
+```
+
+## 构建工具
+
+### 前置依赖
+```bash
+# 安装依赖（Ubuntu/Debian）
 make install
 
-# 构建所有组件（前端、eBPF 和 Rust）
+# 或手动安装：
+sudo apt-get install -y libelf1 libelf-dev zlib1g-dev make clang llvm
+```
+
+### 构建命令
+```bash
+# 构建所有工具
 make build
 
-# 或单独构建：
-# make build-frontend  # 构建前端资源
-# make build-bpf       # 构建 eBPF 程序
-# make build-rust      # 构建 Rust collector
-```
+# 构建单个工具
+make process
+make sslsniff
+make stdiocap
 
-### Web 界面
+# 构建带调试符号的版本
+make debug
+make sslsniff-debug
 
-`record -- <command>` 默认启动 Web UI。低层 `debug trace` 需要传入 `--server`：
-- **时间线视图**：http://127.0.0.1:7395/timeline
-- **进程树**：http://127.0.0.1:7395/tree
-- **原始日志**：http://127.0.0.1:7395/logs
-
-查看已保存的 SQLite 会话可以运行 `agentsight report serve --db run.db`，然后打开同样的 Web 路由。
-
-<div align="center">
-  <img src="https://github.com/eunomia-bpf/agentsight/raw/master/docs/demo-tree.png" alt="AgentSight 演示 - 进程树可视化" width="800">
-  <p><em>进程树视图，展示智能体子进程和文件活动</em></p>
-</div>
-
-<div align="center">
-  <img src="https://github.com/eunomia-bpf/agentsight/raw/master/docs/demo-timeline.png" alt="AgentSight 演示 - 时间线可视化" width="800">
-  <p><em>时间线视图，展示 LLM、进程、文件和网络事件</em></p>
-</div>
-
-<div align="center">
-  <img src="https://github.com/eunomia-bpf/agentsight/raw/master/docs/demo-metrics.png" alt="AgentSight 演示 - 指标可视化" width="800">
-  <p><em>指标视图，展示内存和 CPU 使用情况</em></p>
-</div>
-
-### 支持的智能体
-
-> **权限：** eBPF probe 需要 root。运行实时捕获命令时使用 `sudo`。
-
-`record` 自动发现二进制、SSL 库和容器进程，开箱即用：
-
-| 智能体 | 命令 |
-|--------|------|
-| Claude Code | `sudo ./agentsight record -- claude` |
-| Gemini CLI | `sudo ./agentsight record -- gemini` |
-| Python（aider、open-interpreter 等） | `sudo ./agentsight record -c python` |
-| Docker 容器（OpenClaw 等） | `sudo ./agentsight record -c node --binary-path docker://openclaw` |
-| 任意命令 | `sudo ./agentsight record -- <command>` |
-
-详见 [docs/agents.md](https://github.com/eunomia-bpf/agentsight/blob/master/docs/agents.md)，了解各智能体的详细设置、SSL 注意事项、浏览器捕获、MCP stdio 和高级选项。
-
-### OpenTelemetry 导出
-
-AgentSight 可以将捕获的 LLM 调用导出为 OpenTelemetry **GenAI**（`gen_ai.*`）span，
-通过 OTLP/HTTP 发送——无需任何进程内插桩即可获得符合标准的智能体遥测数据。
-
-```bash
-sudo ./agentsight debug trace --otel --otel-endpoint http://localhost:4318
-```
-
-详见 [docs/otel.md](https://github.com/eunomia-bpf/agentsight/blob/master/docs/otel.md)。
-
-## 常见问题
-
-### 通用问题
-
-**问：AgentSight 与传统 APM 工具有什么区别？**
-答：AgentSight 使用 eBPF 在内核级运行，提供独立于应用代码的系统级监控。传统 APM 需要插桩，而插桩可能被修改或禁用。
-
-**问：性能影响如何？**
-答：由于采用优化的 eBPF 内核空间数据采集，CPU 开销不到 3%。
-
-**问：智能体能否检测到自己正在被监控？**
-答：检测极其困难，因为监控在内核级进行，无需修改代码。
-
-### 技术问题
-
-**问：支持哪些 Linux 发行版？**
-答：任何内核 4.1+（推荐 5.0+）的发行版。已在 Ubuntu 20.04+、CentOS 8+、RHEL 8+ 上测试通过。
-
-**问：能否同时监控多个智能体？**
-答：可以，使用组合监控模式可以对多个智能体进行并发观测和关联分析。
-
-**问：如何过滤敏感数据？**
-答：内置 Analyzer 可以移除认证头信息并过滤特定内容模式。
-
-**问：为什么 AgentSight 无法捕获 Claude Code、Node.js 或 Gemini CLI 的流量？**
-答：这些应用把 SSL 库静态链接进了自己的二进制（Claude/Bun 使用 BoringSSL，**所有** Node.js——NVM 和系统安装都是——使用 OpenSSL），而非使用系统 `libssl.so`，所以默认没有可供 sslsniff hook 的目标。AgentSight 已为你处理：`record -- <command>` 总会自动发现二进制，`record -c node` 现在也会自动发现 Node 二进制。对于 Claude attach 模式，请传 `--binary-path`。详见"零配置：record"和"监控 Node.js AI 工具"章节。
-
-**问：为什么 `--comm claude` 无法捕获 SSL 流量？**
-答：Claude Code 的 SSL 流量运行在内部 "HTTP Client" 线程上，而非主 "claude" 线程。sslsniff 中的 `--comm` 过滤器匹配的是线程名（来自 `bpf_get_current_comm()`），而非进程名。使用 `--binary-path` 时，collector 会自动跳过 SSL 监控的 `--comm` 过滤。
-
-### 故障排除
-
-**问："Permission denied" 错误**
-答：确保使用 `sudo` 运行或拥有 `CAP_BPF` 和 `CAP_SYS_ADMIN` 能力。
-
-**问："Failed to load eBPF program" 错误**
-答：验证内核版本是否满足要求（见前置要求）。如需要，请为你的架构更新 vmlinux.h。
-
-
-## 参与贡献
-
-欢迎贡献！克隆并构建后（见上方安装章节），你可以：
-
-```bash
 # 运行测试
 make test
 
-# 前端开发服务器
-cd frontend && npm run dev
-
-# 使用 AddressSanitizer 构建调试版本
-make -C bpf debug
+# 清理构建产物
+make clean
 ```
 
-### 关键资源
+## 架构
 
-- [CLAUDE.md](https://github.com/eunomia-bpf/agentsight/blob/master/CLAUDE.md) - 项目指南和架构
-- [docs/design/README.md](https://github.com/eunomia-bpf/agentsight/blob/master/docs/design/README.md) - 归档的设计笔记和研究草稿
+两个工具使用相同的架构模式：
 
-## 许可证
+1. **eBPF 内核程序**（`.bpf.c` 文件）
+   - 内核空间代码，挂钩到系统事件
+   - 以极低的性能开销采集数据
+   - 输出结构化事件数据
 
-MIT 许可证 - 详见 [LICENSE](https://github.com/eunomia-bpf/agentsight/blob/master/LICENSE)。
+2. **用户空间加载器**（`.c` 文件）
+   - 加载和管理 eBPF 程序
+   - 处理内核事件并格式化输出
+   - 处理命令行参数和配置
 
----
+3. **头文件**（`.h` 文件）
+   - 内核和用户空间之间的共享数据结构
+   - 事件定义和配置常量
 
-**AI 可观测性的未来**：随着 AI 智能体变得更加自主且具备自我修改能力，传统的可观测性方法变得力不从心。AgentSight 为大规模安全部署 AI 提供了独立的系统级监控。
+## 输出格式
+
+两个工具都将 JSON 格式的事件输出到 stdout，启用详细模式时调试信息发送到 stderr。
+
+### JSON Schema
+
+所有事件遵循通用基础 schema，并包含事件特定字段：
+
+**基础事件字段：**
+- `timestamp`：Unix 时间戳，纳秒（uint64）
+- `event`：事件类型字符串（EXEC、EXIT、FILE_OPEN、BASH_READLINE、SSL_READ、SSL_WRITE、SSL_HANDSHAKE）
+- `comm`：进程命令名（字符串，最长 16 字符）
+- `pid`：进程 ID（int32）
+
+**进程事件字段：**
+- `ppid`：父进程 ID（int32）
+- `filename`：可执行文件路径（字符串，仅 EXEC 事件）
+- `exit_code`：进程退出码（uint32，仅 EXIT 事件）
+- `duration_ms`：进程生命周期，毫秒（uint64，仅 EXIT 事件）
+
+**文件打开事件字段：**
+- `count`：聚合的文件打开次数（uint32）
+- `filepath`：文件完整路径（字符串，最长 256 字符）
+- `flags`：文件打开标志（int32）
+- `window_expired`：聚合窗口过期时出现（布尔值，可选）
+- `reason`：聚合刷新原因（字符串，可选："process_exit"）
+
+**Bash Readline 事件字段：**
+- `command`：输入的命令行（字符串，最长 256 字符）
+
+**SSL 事件字段：**
+- `uid`：进程的用户 ID（uint32）
+- `data`：SSL 流量数据（字符串，受 `MAX_BUF_SIZE` 限制）
+- `data_len`：捕获的数据长度（uint32）
+- `truncated`：数据是否因大小限制被截断（布尔值）
+
+### 进程追踪器 JSON 事件
+
+**进程事件：**
+```json
+{
+  "timestamp": 1234567890123456789,
+  "event": "EXEC",
+  "comm": "python3",
+  "pid": 1234,
+  "ppid": 1000,
+  "filename": "/usr/bin/python3"
+}
+
+{
+  "timestamp": 1234567890123456789,
+  "event": "EXIT",
+  "comm": "python3",
+  "pid": 1234,
+  "ppid": 1000,
+  "exit_code": 0,
+  "duration_ms": 5000
+}
+```
+
+**文件打开事件：**
+```json
+{
+  "timestamp": 1234567890123456789,
+  "event": "FILE_OPEN",
+  "comm": "python3",
+  "pid": 1234,
+  "count": 1,
+  "filepath": "/etc/passwd",
+  "flags": 0
+}
+
+{
+  "timestamp": 1234567890123456789,
+  "event": "FILE_OPEN",
+  "comm": "python3",
+  "pid": 1234,
+  "count": 5,
+  "filepath": "/etc/passwd",
+  "flags": 0,
+  "window_expired": true
+}
+
+{
+  "timestamp": 1234567890123456789,
+  "event": "FILE_OPEN",
+  "comm": "python3",
+  "pid": 1234,
+  "count": 3,
+  "filepath": "/tmp/tempfile.txt",
+  "flags": 577,
+  "reason": "process_exit"
+}
+```
+
+**Bash Readline 事件：**
+```json
+{
+  "timestamp": 1234567890123456789,
+  "event": "BASH_READLINE",
+  "comm": "bash",
+  "pid": 1234,
+  "command": "ls -la"
+}
+```
+
+### SSL 流量监控器 JSON 事件
+
+每个 SSL 事件为单行 JSON，schema 如下：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `function` | string | `"READ/RECV"`、`"WRITE/SEND"` 或 `"HANDSHAKE"` |
+| `timestamp_ns` | uint64 | 系统启动后的纳秒（`bpf_ktime_get_ns()`） |
+| `comm` | string | 线程名（最长 16 字符），如 `"curl"`、`"HTTP Client"` |
+| `pid` | int32 | 进程 ID（tgid） |
+| `tid` | int32 | 线程 ID |
+| `uid` | uint32 | 用户 ID |
+| `len` | int32 | SSL_read/SSL_write 返回的总字节数 |
+| `buf_size` | uint32 | 实际复制到事件缓冲区的字节数（可能 < `len`） |
+| `latency_ms` | float | SSL_read/SSL_write 进入到退出之间的时间，毫秒 |
+| `is_handshake` | bool | 如果是握手事件则为 `true` |
+| `data` | string\|null | 解密的明文内容（JSON 转义），无数据时为 `null` |
+| `truncated` | bool | 如果 `buf_size < len`（数据超过配置的事件缓冲区）则为 `true` |
+| `bytes_lost` | int | 仅在 `truncated` 为 `true` 时出现：`len - buf_size` |
+
+**SSL 读写事件：**
+```json
+{
+  "function": "WRITE/SEND",
+  "timestamp_ns": 242692590000000,
+  "comm": "HTTP Client",
+  "pid": 959023,
+  "tid": 959035,
+  "uid": 1000,
+  "len": 2865,
+  "buf_size": 2865,
+  "latency_ms": 0.042,
+  "is_handshake": false,
+  "data": "POST /v1/messages?beta=true HTTP/1.1\r\nHost: api.anthropic.com\r\n...",
+  "truncated": false
+}
+
+{
+  "function": "READ/RECV",
+  "timestamp_ns": 242692596213720,
+  "comm": "HTTP Client",
+  "pid": 959023,
+  "tid": 959035,
+  "uid": 1000,
+  "len": 1192,
+  "buf_size": 1192,
+  "latency_ms": 0.014,
+  "is_handshake": false,
+  "data": "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n...",
+  "truncated": false
+}
+```
+
+**截断事件**（数据超过配置的事件缓冲区时）：
+```json
+{
+  "function": "WRITE/SEND",
+  "timestamp_ns": 242692590000000,
+  "comm": "HTTP Client",
+  "pid": 959023,
+  "tid": 959035,
+  "uid": 1000,
+  "len": 600000,
+  "buf_size": 262144,
+  "latency_ms": 0.100,
+  "is_handshake": false,
+  "data": "POST /v1/messages ...(截断后的载荷)...",
+  "truncated": true,
+  "bytes_lost": 337856
+}
+```
+
+**SSL 握手事件**（仅在使用 `--handshake` / `-h` 参数时）：
+```json
+{
+  "function": "HANDSHAKE",
+  "timestamp_ns": 242692580000000,
+  "comm": "HTTP Client",
+  "pid": 959023,
+  "tid": 959035,
+  "uid": 1000,
+  "len": 0,
+  "buf_size": 0,
+  "latency_ms": 12.345,
+  "is_handshake": true,
+  "data": null,
+  "truncated": false
+}
+```
+
+**注意事项：**
+- `comm` 是 `bpf_get_current_comm()` 返回的**线程名**，而非进程名。例如，Claude Code 的 SSL 流量显示 `"HTTP Client"`，而非 `"claude"`。
+- `data` 包含解密的明文。控制字符会被 JSON 转义（`\n`、`\r`、`\t`、`\uXXXX`）。有效的 UTF-8 序列直接传递。
+- `len` 是 SSL_read/SSL_write 返回的值。`buf_size` 是实际复制的量（上限为 `MAX_BUF_SIZE`）。
+
+### 常见使用模式
+
+**实时监控：**
+```bash
+# 监控并格式化 JSON 输出
+sudo ./process -v -c "python" | jq '.'
+
+# 过滤特定事件类型
+sudo ./process -c "curl" | jq 'select(.event == "FILE_OPEN")'
+
+# 监控 SSL 流量并美化打印
+sudo ./sslsniff -p 1234 | jq '.'
+```
+
+**日志收集：**
+```bash
+# 保存到文件并带时间戳
+sudo ./process -m 1 > process_events.jsonl 2> process_debug.log
+
+# 管道到 syslog
+sudo ./sslsniff -c "nginx" | logger -t sslsniff
+
+# 发送到日志聚合系统
+sudo ./process -c "app" | ./log_shipper --index=security
+```
+
+**集成示例：**
+```bash
+# 与分析工具结合
+sudo ./process -p 1234 | python3 analyze_events.py
+
+# 实时告警
+sudo ./sslsniff -u 1000 | grep -i "password" | alert_system.sh
+
+# 统计分析
+sudo ./process -c "python" | jq -r '.event' | sort | uniq -c
+```
+
+JSON 输出设计用于：
+- 日志聚合系统（ELK、Splunk 等）
+- 实时分析管道
+- 与 Rust collector 框架集成
+- 安全信息和事件管理（SIEM）系统
+- 自定义分析和监控脚本
+
+## 安全注意事项
+
+**重要安全说明：**
+- 两个工具都需要 root 权限来加载 eBPF 程序
+- SSL 流量捕获包含潜在敏感数据
+- 进程监控可能暴露系统信息
+- 仅用于防御性安全和监控目的
+
+## 集成
+
+这些工具设计为与 `collector` 框架配合使用：
+- 构建的二进制文件在编译时嵌入到 Rust collector 中
+- Collector 提供流式分析和事件处理
+- 输出可被多个 Analyzer 插件处理
+
+## 故障排除
+
+**权限问题：**
+```bash
+# 确保正确的权限
+sudo ./process
+sudo ./sslsniff
+```
+
+**内核兼容性：**
+- 需要支持 eBPF 的 Linux 内核（4.1+）
+- 推荐 CO-RE（编译一次，到处运行）支持
+- 检查内核配置：`CONFIG_BPF=y`、`CONFIG_BPF_SYSCALL=y`
+
+**调试模式：**
+```bash
+# 使用 AddressSanitizer 构建用于调试
+make debug
+sudo ./process-debug
+```
+
+## 相关文档
+
+- 查看 `/collector/README.md` 了解 Rust 框架集成
+- 查看 `/CLAUDE.md` 了解开发指南
+- 查看项目主 README 了解整体架构

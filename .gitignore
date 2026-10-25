@@ -1,46 +1,14 @@
-.direnv
-.env
-.env.*
-!.env.example
-/build
-output
-target/
-/agentsight-capture/Cargo.lock
-/agentsight-protocol/Cargo.lock
-/compat/agentsight-capture/Cargo.lock
-/ext/analysis/Cargo.lock
-/ext/runtime/Cargo.lock
-/ext/session/Cargo.lock
-ecapture
-res.txt
-save.log
-test_events.log
-ssl_analyzed.json
-__pycache__/
-ssl_timeline.json
-.venv/
-agentsight
-!package/
-!package/npm/
-!package/npm/agentsight/
-!package/npm/agentsight/**
-record.log
-record.log.*
-.agentsight/
-# Local UI development captures and scratch artifacts
-/.capture/
-# Local-only real snapshot used for UI dev (not committed; sensitive)
-frontend/public/sample-snapshot.json
-# Generated Rust/WASM browser bindings
-frontend/src/generated/
-# Log files
-*.log
-docs/blog
-
-node_modules/
-
-# Cloudflare Workers local state and secrets.
-.wrangler/
-.dev.vars*
-!.dev.vars.example
-/.agents/skills/
+/.output
+/bootstrap
+/sslsniff
+/browsertrace
+/stdiocap
+/process
+/test_process_utils
+/test_process_filter
+/test_process_ext_map_flush
+/test_process_ext_mem_info
+/test_process_ext_types
+/test_sslsniff_transport_identity
+/test_sslsniff_transport_identity_boringssl
+/test_sslsniff_output
