@@ -1,3 +1,8 @@
+*.gch
+a.out
+*.o
+*.txt
+vmlinux.h
 /.output
 /bootstrap
 /sslsniff
